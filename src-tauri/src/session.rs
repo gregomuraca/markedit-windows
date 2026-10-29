@@ -52,7 +52,7 @@ impl Response {
 }
 
 impl Session {
-    fn save(&mut self, text: &str, as_new: bool, ui: &impl Dialogs) -> Result<bool> {
+    fn save(&mut self, text: &str, as_new: bool, images: &[String], ui: &impl Dialogs) -> Result<bool> {
         let path = if as_new || self.doc.path.is_none() {
             ui.save(self.doc.path.as_deref())
         } else {
@@ -67,7 +67,7 @@ impl Session {
         if same && self.doc.changed_on_disk()? && !ui.overwrite() {
             return Ok(false);
         }
-        self.doc.write(&path, text)?;
+        self.doc.write_with_images(&path, text, images)?;
         Ok(true)
     }
     pub fn perform(
@@ -75,10 +75,11 @@ impl Session {
         action: &str,
         text: &str,
         dirty: bool,
+        images: &[String],
         ui: &impl Dialogs,
     ) -> Result<Response> {
         if action == "save" || action == "saveAs" {
-            return Ok(if self.save(text, action == "saveAs", ui)? {
+            return Ok(if self.save(text, action == "saveAs", images, ui)? {
                 Response::new("saved", Some(text.into()))
             } else {
                 Response::new("none", None)
@@ -102,7 +103,7 @@ impl Session {
             match ui.unsaved() {
                 Choice::Cancel => return Ok(Response::new("none", None)),
                 Choice::Save => {
-                    if !self.save(text, false, ui)? {
+                    if !self.save(text, false, images, ui)? {
                         return Ok(Response::new("none", None));
                     }
                 }
@@ -127,6 +128,28 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn save_as_cancellation_and_image_copy_preserve_original_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let destination = dir.path().join("destination");
+        std::fs::create_dir_all(original.join("assets")).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(original.join("assets/photo.png"), b"photo").unwrap();
+        let mut session = Session::default();
+        session.doc.write(&original.join("note.md"), "saved").unwrap();
+        let before = session.doc.path.clone();
+        let images = vec!["assets/photo.png".into()];
+        let ui = Ui { path: None, choice: 2, overwrite: false };
+        assert_eq!(session.perform("saveAs", "draft", true, &images, &ui).unwrap().kind, "none");
+        assert_eq!(session.doc.path, before);
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+        let ui = Ui { path: Some(destination.join("copy.md")), ..ui };
+        assert_eq!(session.perform("saveAs", "draft", true, &images, &ui).unwrap().kind, "saved");
+        assert_eq!(std::fs::read_to_string(original.join("note.md")).unwrap(), "saved");
+        assert_eq!(std::fs::read(destination.join("assets/photo.png")).unwrap(), b"photo");
+        assert_eq!(std::fs::read_to_string(destination.join("copy.md")).unwrap(), "draft");
+    }
     #[test]
     fn heading_names_are_safe_and_preserve_document_type() {
         use std::path::Path;
@@ -172,9 +195,9 @@ mod tests {
             choice: 2,
             overwrite: false,
         };
-        assert_eq!(s.perform("close", "draft", true, &ui).unwrap().kind, "none");
+        assert_eq!(s.perform("close", "draft", true, &[], &ui).unwrap().kind, "none");
         let ui = Ui { choice: 0, ..ui };
-        assert_eq!(s.perform("new", "draft", true, &ui).unwrap().kind, "none");
+        assert_eq!(s.perform("new", "draft", true, &[], &ui).unwrap().kind, "none");
     }
     #[test]
     fn discard_and_clean_close() {
@@ -184,8 +207,8 @@ mod tests {
             choice: 1,
             overwrite: false,
         };
-        assert_eq!(s.perform("new", "draft", true, &ui).unwrap().kind, "load");
-        assert_eq!(s.perform("close", "", false, &ui).unwrap().kind, "close");
+        assert_eq!(s.perform("new", "draft", true, &[], &ui).unwrap().kind, "load");
+        assert_eq!(s.perform("close", "", false, &[], &ui).unwrap().kind, "close");
     }
     #[test]
     fn reopen_after_save_reads_latest_text() {
@@ -197,9 +220,9 @@ mod tests {
             overwrite: true,
         };
         let mut s = Session::default();
-        s.perform("save", "old", true, &ui).unwrap();
+        s.perform("save", "old", true, &[], &ui).unwrap();
         assert_eq!(
-            s.perform("open", "new", true, &ui).unwrap().text.unwrap(),
+            s.perform("open", "new", true, &[], &ui).unwrap().text.unwrap(),
             "new"
         );
     }
@@ -213,15 +236,15 @@ mod tests {
             overwrite: false,
         };
         let mut s = Session::default();
-        s.perform("save", "original", true, &ui).unwrap();
+        s.perform("save", "original", true, &[], &ui).unwrap();
         std::fs::write(&p, "external").unwrap();
-        assert_eq!(s.perform("save", "local", true, &ui).unwrap().kind, "none");
+        assert_eq!(s.perform("save", "local", true, &[], &ui).unwrap().kind, "none");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "external");
         let ui = Ui {
             overwrite: true,
             ..ui
         };
-        assert_eq!(s.perform("save", "local", true, &ui).unwrap().kind, "saved");
+        assert_eq!(s.perform("save", "local", true, &[], &ui).unwrap().kind, "saved");
     }
     #[test]
     fn failed_open_retains_previous_document() {
@@ -233,13 +256,13 @@ mod tests {
             overwrite: false,
         };
         let mut s = Session::default();
-        s.perform("save", "original", true, &ui).unwrap();
+        s.perform("save", "original", true, &[], &ui).unwrap();
         let original = s.doc.path.clone();
         let ui = Ui {
             path: Some(d.path().join("missing")),
             ..ui
         };
-        assert!(s.perform("open", "draft", true, &ui).is_err());
+        assert!(s.perform("open", "draft", true, &[], &ui).is_err());
         assert_eq!(s.doc.path, original);
     }
 }

@@ -28,6 +28,7 @@ npm run typecheck
 npm run test:rust
 npm run test:ui
 npm run test:ui-export
+npm run test:ui-images
 npm run test:ui-accessibility
 ```
 

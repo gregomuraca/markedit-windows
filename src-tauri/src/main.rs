@@ -106,11 +106,12 @@ async fn perform(
     text: String,
     dirty: bool,
     heading: Option<String>,
+    image_sources: Vec<String>,
 ) -> Result<session::Response, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut session = shared.lock().map_err(|e| e.to_string())?;
-        let mut result = session.perform(&action, &text, dirty, &NativeDialogs(window.clone(), heading))?;
+        let mut result = session.perform(&action, &text, dirty, &image_sources, &NativeDialogs(window.clone(), heading))?;
         result.mermaid = session.doc.is_mermaid();
         title(
             &window,
@@ -153,7 +154,7 @@ async fn attach_image(
         let mut session = shared.lock().map_err(|e| e.to_string())?;
         let mut saved = false;
         if session.doc.path.is_none() {
-            let response = session.perform("save", &text, dirty, &NativeDialogs(window.clone(), heading))?;
+            let response = session.perform("save", &text, dirty, &[], &NativeDialogs(window.clone(), heading))?;
             if response.kind != "saved" {
                 return Ok(serde_json::json!({"source": null, "saved": false}));
             }

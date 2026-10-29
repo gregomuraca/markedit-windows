@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 pub const LIMIT: u64 = 20 * 1024 * 1024;
@@ -31,7 +31,109 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[derive(Default)]
+struct ImageCopies {
+    files: Vec<PathBuf>,
+    directories: Vec<PathBuf>,
+    committed: bool,
+}
+impl Drop for ImageCopies {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        for path in self.files.iter().rev() { let _ = fs::remove_file(path); }
+        for path in self.directories.iter().rev() { let _ = fs::remove_dir(path); }
+    }
+}
+impl ImageCopies {
+    fn directory(&mut self, base: &Path, relative: &Path) -> Result<PathBuf> {
+        let mut directory = base.to_path_buf();
+        for part in relative.components() {
+            let Component::Normal(name) = part else { return Err("Invalid image folder.".into()); };
+            directory.push(name);
+            match fs::create_dir(&directory) {
+                Ok(()) => self.directories.push(directory.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(e) => return Err(e.to_string()),
+            }
+            let resolved = fs::canonicalize(&directory).map_err(|e| e.to_string())?;
+            if !resolved.starts_with(base) || !resolved.is_dir() {
+                return Err("The destination image folder must stay inside the document folder.".into());
+            }
+        }
+        Ok(directory)
+    }
+}
+
+fn image_reference(source: &str) -> Option<(PathBuf, &'static str)> {
+    if source.len() > 4096 { return None; }
+    let decoded = percent_encoding::percent_decode_str(source).decode_utf8().ok()?;
+    if decoded.contains(':') || decoded.starts_with(['/', '\\']) { return None; }
+    let mut relative = PathBuf::new();
+    for part in Path::new(decoded.as_ref()).components() {
+        match part {
+            Component::Normal(name) => relative.push(name),
+            Component::CurDir => {},
+            Component::ParentDir => { if !relative.pop() { return None; } },
+            _ => return None,
+        }
+    }
+    let mime = image_mime(&relative)?;
+    Some((relative, mime))
+}
+fn image_mime(path: &Path) -> Option<&'static str> {
+    Some(match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif",
+        "webp" => "image/webp", "bmp" => "image/bmp", _ => return None,
+    })
+}
+
 impl Document {
+    pub fn write_with_images(&mut self, path: &Path, text: &str, sources: &[String]) -> Result<()> {
+        let Some(old_parent) = self.path.as_ref().and_then(|p| p.parent()) else {
+            return self.write(path, text);
+        };
+        let old_base = fs::canonicalize(old_parent).map_err(|e| e.to_string())?;
+        let new_base = fs::canonicalize(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
+        if old_base == new_base || sources.is_empty() { return self.write(path, text); }
+        let mut copied = ImageCopies::default();
+        for source in sources {
+            let Some((relative, _)) = image_reference(source) else { continue; };
+            // Preserve existing unavailable-image placeholders without broadening local file access.
+            let original = fs::canonicalize(old_base.join(&relative)).ok()
+                .filter(|p| p.starts_with(&old_base) && image_mime(p).is_some());
+            let Some(original) = original else {
+                if fs::symlink_metadata(new_base.join(&relative)).is_ok() {
+                    return Err(format!("Image {source} is unavailable in the original folder but exists in the destination. Choose another folder for Save As."));
+                }
+                continue;
+            };
+            let bytes = read_bytes(&original).map_err(|e| format!("Could not copy image {source}: {e}"))?;
+            let parent = copied.directory(&new_base, relative.parent().unwrap_or(Path::new("")))?;
+            let destination = parent.join(relative.file_name().ok_or("Invalid image filename.")?);
+            if fs::canonicalize(&parent).map_err(|e| e.to_string())? == new_base
+                && relative.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case(&path.file_name().ok_or("Invalid document filename.")?.to_string_lossy()) {
+                return Err("The document filename conflicts with an image. Choose another filename.".into());
+            }
+            if fs::symlink_metadata(&destination).is_ok() {
+                let resolved = fs::canonicalize(&destination).map_err(|e| e.to_string())?;
+                if !resolved.starts_with(&new_base) {
+                    return Err("The destination image must stay inside the document folder.".into());
+                }
+                if read_bytes(&destination)? != bytes {
+                    return Err(format!("An image named {} already exists with different contents. Choose another folder for Save As.", relative.display()));
+                }
+                continue;
+            }
+            let mut image = tempfile::NamedTempFile::new_in(&parent).map_err(|e| e.to_string())?;
+            image.write_all(&bytes).map_err(|e| e.to_string())?;
+            image.as_file().sync_all().map_err(|e| e.to_string())?;
+            image.persist_noclobber(&destination).map_err(|e| e.error.to_string())?;
+            copied.files.push(destination);
+        }
+        self.write(path, text)?;
+        copied.committed = true;
+        Ok(())
+    }
     pub fn is_mermaid(&self) -> bool {
         self.path
             .as_ref()
@@ -123,29 +225,13 @@ impl Document {
     }
 
     pub fn image(&self, source: &str) -> Option<String> {
-        if source.len() > 4096 {
-            return None;
-        }
-        let decoded = percent_encoding::percent_decode_str(source)
-            .decode_utf8()
-            .ok()?;
-        if decoded.contains(':') || decoded.starts_with(['/', '\\']) {
-            return None;
-        }
+        let (relative, _) = image_reference(source)?;
         let base = fs::canonicalize(self.path.as_ref()?.parent()?).ok()?;
-        let file = fs::canonicalize(base.join(decoded.as_ref())).ok()?;
+        let file = fs::canonicalize(base.join(relative)).ok()?;
         if !file.starts_with(&base) {
             return None;
         }
-        let ext = file.extension()?.to_str()?.to_ascii_lowercase();
-        let mime = match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            _ => return None,
-        };
+        let mime = image_mime(&file)?;
         Some(format!(
             "data:{mime};base64,{}",
             STANDARD.encode(read_bytes(&file).ok()?)
@@ -156,6 +242,104 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn image_fixture() -> (tempfile::TempDir, Document, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let destination = dir.path().join("destination");
+        fs::create_dir_all(original.join("assets/nested")).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(original.join("assets/nested/a b.png"), b"image bytes").unwrap();
+        fs::write(original.join("assets/unused.png"), b"unrelated").unwrap();
+        let mut doc = Document::default();
+        doc.bom = true;
+        doc.write(&original.join("source.md"), "original\r\n").unwrap();
+        (dir, doc, original, destination)
+    }
+    #[test]
+    fn save_as_copies_only_referenced_images_and_preserves_text_and_original() {
+        let (_dir, mut doc, original, destination) = image_fixture();
+        let text = "# Café\r\n\r\n![Photo](assets/nested/a%20b.png)\r\n";
+        let sources = vec!["assets/nested/a%20b.png".into(), "assets/nested/a%20b.png".into()];
+        doc.write_with_images(&destination.join("copy.md"), text, &sources).unwrap();
+        assert_eq!(fs::read(destination.join("assets/nested/a b.png")).unwrap(), b"image bytes");
+        assert!(!destination.join("assets/unused.png").exists());
+        assert_eq!(fs::read(original.join("source.md")).unwrap(), b"\xef\xbb\xbforiginal\r\n");
+        assert_eq!(Document::read(&destination.join("copy.md")).unwrap().1, text);
+        assert!(doc.image(&sources[0]).is_some());
+        assert!(!doc.changed_on_disk().unwrap());
+        assert_eq!(fs::read(original.join("assets/nested/a b.png")).unwrap(), b"image bytes");
+    }
+    #[test]
+    fn conflicting_image_aborts_without_replacing_documents_or_leaving_copies() {
+        let (_dir, mut doc, original, destination) = image_fixture();
+        fs::create_dir_all(destination.join("assets/nested")).unwrap();
+        fs::write(destination.join("assets/nested/a b.png"), b"existing other image").unwrap();
+        fs::write(original.join("assets/first.png"), b"first").unwrap();
+        fs::write(destination.join("copy.md"), "keep this document").unwrap();
+        let before = doc.path.clone();
+        let sources = vec!["assets/first.png".into(), "assets/nested/a%20b.png".into()];
+        assert!(doc.write_with_images(&destination.join("copy.md"), "draft", &sources).unwrap_err().contains("different contents"));
+        assert_eq!(doc.path, before);
+        assert_eq!(fs::read_to_string(destination.join("copy.md")).unwrap(), "keep this document");
+        assert_eq!(fs::read(destination.join("assets/nested/a b.png")).unwrap(), b"existing other image");
+        assert!(!destination.join("assets/first.png").exists());
+        assert!(!doc.changed_on_disk().unwrap());
+    }
+    #[test]
+    fn identical_images_are_reused_and_failed_markdown_write_rolls_back_new_images() {
+        let (_dir, mut doc, _original, destination) = image_fixture();
+        let sources = vec!["assets/nested/a%20b.png".into()];
+        let folder = destination.join("folder.md"); fs::create_dir(&folder).unwrap();
+        let before = doc.path.clone();
+        assert!(doc.write_with_images(&folder, "draft", &sources).is_err());
+        assert_eq!(doc.path, before);
+        assert!(!destination.join("assets").exists());
+        fs::create_dir_all(destination.join("assets/nested")).unwrap();
+        fs::write(destination.join("assets/nested/a b.png"), b"image bytes").unwrap();
+        doc.write_with_images(&destination.join("copy.md"), "draft", &sources).unwrap();
+        assert_eq!(fs::read_dir(destination.join("assets/nested")).unwrap().count(), 1);
+    }
+    #[test]
+    fn relocation_keeps_image_limits_and_does_not_copy_remote_or_outside_files() {
+        let (dir, mut doc, original, destination) = image_fixture();
+        fs::write(dir.path().join("secret.png"), b"outside").unwrap();
+        let sources = vec!["../secret.png".into(), "%2e%2e/secret.png".into(), "https://example.com/a.png".into(), "data:image/png;base64,eA==".into(), "missing.png".into(), "file.svg".into()];
+        doc.write_with_images(&destination.join("copy.md"), "draft", &sources).unwrap();
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
+        let (mut doc, _) = Document::read(&original.join("source.md")).unwrap();
+        File::create(original.join("huge.png")).unwrap().set_len(LIMIT + 1).unwrap();
+        assert!(doc.write_with_images(&destination.join("copy.md"), "replacement", &["huge.png".into()]).is_err());
+        assert_eq!(Document::read(&destination.join("copy.md")).unwrap().1, "draft");
+    }
+    #[test]
+    fn markdown_filename_cannot_replace_a_copied_image_even_with_different_case() {
+        let (_dir, mut doc, original, destination) = image_fixture();
+        fs::write(original.join("photo.png"), b"image").unwrap();
+        assert!(doc.write_with_images(&destination.join("PHOTO.PNG"), "draft", &["photo.png".into()]).is_err());
+        assert!(!destination.join("photo.png").exists());
+    }
+    #[test]
+    fn missing_original_image_cannot_silently_use_an_unrelated_destination_image() {
+        let (_dir, mut doc, _original, destination) = image_fixture();
+        fs::write(destination.join("missing.png"), b"unrelated image").unwrap();
+        let before = doc.path.clone();
+        assert!(doc.write_with_images(&destination.join("copy.md"), "draft", &["missing.png".into()]).is_err());
+        assert_eq!(doc.path, before);
+        assert!(!destination.join("copy.md").exists());
+        assert_eq!(fs::read(destination.join("missing.png")).unwrap(), b"unrelated image");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn junctions_cannot_redirect_image_copy_outside_destination() {
+        let (dir, mut doc, _original, destination) = image_fixture();
+        let outside = dir.path().join("outside"); fs::create_dir(&outside).unwrap();
+        let junction = destination.join("assets");
+        assert!(std::process::Command::new("cmd.exe").args(["/C", "mklink", "/J"])
+            .arg(&junction).arg(&outside).stdout(std::process::Stdio::null()).status().unwrap().success());
+        assert!(doc.write_with_images(&destination.join("copy.md"), "draft", &["assets/nested/a%20b.png".into()]).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(!destination.join("copy.md").exists());
+    }
     #[test]
     fn attachments_are_local_unique_and_previewable() {
         let dir = tempfile::tempdir().unwrap();

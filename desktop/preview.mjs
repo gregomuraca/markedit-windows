@@ -96,5 +96,6 @@ export function markdownPreview(source) {
     input.setAttribute('aria-label', `Toggle task: ${input.closest('li')?.textContent.trim().slice(0, 120) || index + 1}`);
     tasks.push({ input, from });
   }
-  return { fragment, tasks, text };
+  const imageSources = [...new Set([...fragment.querySelectorAll('img[src]')].map(img => img.getAttribute('src')))];
+  return { fragment, tasks, text, imageSources };
 }

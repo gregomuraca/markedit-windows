@@ -12,6 +12,7 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:ui": "node scripts/smoke.cjs",
     "test:ui-export": "node scripts/export-ui.cjs",
+    "test:ui-images": "node scripts/images-ui.cjs",
     "test:ui-accessibility": "node scripts/ui-accessibility.cjs"
   },
   "keywords": [],

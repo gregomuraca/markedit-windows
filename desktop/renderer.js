@@ -179,8 +179,9 @@ function syncScroll() {
 }
 window.windowsEditor={ snapshot:()=>{
   const text=getEditorText();
-  const heading=mermaidFile?null:markdownPreview(text).fragment.querySelector('h1')?.textContent.trim()||null;
-  return {text,dirty:text!==savedText,heading};
+  const parsed=mermaidFile?null:markdownPreview(text);
+  const heading=parsed?.fragment.querySelector('h1')?.textContent.trim()||null;
+  return {text,dirty:text!==savedText,heading,imageSources:parsed?.imageSources||[]};
 },setBusy,load,prepareExport,setMermaid:value=>{mermaidFile=value;} };
 window.desktop.onCommand(command);
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>window.desktop.action(b.dataset.action));
