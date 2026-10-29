@@ -1,7 +1,7 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {argumentsFor,installerEnvironment}=require('./cli.cjs');
 test('defaults invoke the bundled installer with a pinned app release',()=>{
- const args=argumentsFor([]);assert.ok(args.includes(path.join(__dirname,'install.ps1')));assert.deepEqual(args.slice(-2),['-Version','0.3.4']);
+ const args=argumentsFor([]);assert.ok(args.includes(path.join(__dirname,'install.ps1')));assert.deepEqual(args.slice(-2),['-Version','0.4.0']);
 });
 test('installation flags are forwarded as separate arguments',()=>{
  const args=argumentsFor(['--install-only','--no-shortcut','--dir','Folder with spaces']);
