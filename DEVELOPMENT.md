@@ -27,10 +27,13 @@ npm test
 npm run typecheck
 npm run test:rust
 npm run test:ui
+npm run test:ui-export
 npm run test:ui-accessibility
 ```
 
 Desktop tests require a built executable. They launch a separate app instance with an isolated WebView2 profile and temporary files. Set `MARKEDIT_EXE`, `MARKEDIT_WORK_DIR`, or `MARKEDIT_DEBUG_PORT` to override defaults. Accessibility-check screenshots and measurements go to `MARKEDIT_REVIEW_DIR` when provided.
+
+`npm test` includes focused GFM regression checks for table alignment and parsing, task lists, strikethrough, URL/email autolinks, fenced code, line breaks, tag filtering and sanitization. These are feature compatibility tests, not a claim of full GFM specification conformance. Export tests cover offline HTML serialization, anchors, checkbox state and incomplete resources. The native export test exercises file dialogs, draft preservation, cancellation, PDF creation, offline HTML, empty documents and missing images.
 
 ## Package a release
 

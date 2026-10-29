@@ -23,6 +23,7 @@ Inspired by **[MarkEdit](https://github.com/MarkEdit-app/MarkEdit)** for macOS. 
 
 - Write, Split, and Read layouts, with light and dark themes.
 - Live preview for Markdown, tables, task lists, callouts, and Mermaid diagrams.
+- Standalone HTML and PDF export, with embedded local images and diagrams.
 - Image insertion by file selection, clipboard paste, or drag and drop.
 - Keyboard shortcuts, find and replace, and undo/redo.
 - H1-based filename suggestions and a compact YAML frontmatter table.
@@ -55,7 +56,11 @@ Open a Markdown file with **Ctrl+O**, save with **Ctrl+S**, or start a new docum
 
 Images are copied to an `assets` folder beside the document. Saving a new document or choosing Save As suggests a filename from its first H1.
 
-The app uses explicit saves. Autosave, crash recovery, tabs, PDF/HTML export, and math rendering are not included. Files and images can be up to 20 MB; live preview pauses above one million characters.
+Choose **Export → HTML… or PDF…** in the toolbar or **File → Export** to export the current draft. HTML files include their styles, local images and diagrams for offline viewing. PDFs use a light A4 layout. Exporting leaves your Markdown file and unsaved changes untouched; missing images or invalid diagrams remain labeled in the output.
+
+The preview supports GFM tables and alignment, task lists, strikethrough, autolinks and fenced code, plus GitHub-style alerts. Active HTML is sanitized; remote images are not fetched. It does not reproduce every GitHub rendering behavior.
+
+The app uses explicit saves. Autosave, crash recovery, tabs and math rendering are not included. Files and images can be up to 20 MB; live preview and export support up to one million characters. Exported documents can be up to 64 MB.
 
 ## Contributing
 

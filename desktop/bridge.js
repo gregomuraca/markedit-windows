@@ -22,6 +22,7 @@ async function action(action) {
 }
 const listening = listen('desktop-command', ({ payload }) => {
   if (['new', 'open', 'save', 'saveAs', 'close'].includes(payload)) action(payload);
+  else if(payload.startsWith('export:'))window.desktop.exportDocument(payload.slice(7));
   else handler?.(payload);
 });
 window.desktop = {
@@ -30,6 +31,17 @@ window.desktop = {
   async ready() { await listening; await action('startup'); },
   changed(dirty) { invoke('changed', { dirty }).catch(report); },
   image(source) { return invoke('image', { source }); },
+  async exportDocument(format) {
+    if(busy)return;
+    busy=true;window.windowsEditor.setBusy(true,`Exporting ${format.toUpperCase()}…`);
+    let prepared;
+    try {
+      prepared=await window.windowsEditor.prepareExport();
+      const path=await invoke('export_document',{format,html:prepared.html,heading:prepared.title==='Untitled'?null:prepared.title});
+      if(path){document.getElementById('action-notice').hidden=true;document.getElementById('message').textContent=`Exported ${format.toUpperCase()}${prepared.warnings?' with unavailable content labeled':''}.`;}
+    }catch(error){report(error);}
+    finally{prepared?.cleanup();busy=false;window.windowsEditor.setBusy(false);}
+  },
   async attachImage(file) {
     if(busy)return null;
     busy=true; window.windowsEditor.setBusy(true,'Adding image…');

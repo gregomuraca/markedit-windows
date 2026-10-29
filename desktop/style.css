@@ -76,3 +76,7 @@ button:active:not(:disabled),#more-formatting summary:active { background: var(-
   #position { min-width: 82px; }
   #counts { min-width: 120px; }
 }
+#preview th[align=center],#preview td[align=center] { text-align: center; }
+#preview th[align=right],#preview td[align=right] { text-align: right; }
+
+header nav{align-items:center}header select{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--border);border-radius:5px;min-height:40px;padding:5px 8px;max-width:105px}header select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}@media(pointer:coarse){header select{min-height:44px}}
