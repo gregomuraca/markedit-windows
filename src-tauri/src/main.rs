@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod document;
 mod session;
+mod export;
 
 use session::{Choice, Dialogs, Session};
 use std::{
@@ -105,11 +106,12 @@ async fn perform(
     text: String,
     dirty: bool,
     heading: Option<String>,
+    image_sources: Vec<String>,
 ) -> Result<session::Response, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut session = shared.lock().map_err(|e| e.to_string())?;
-        let mut result = session.perform(&action, &text, dirty, &NativeDialogs(window.clone(), heading))?;
+        let mut result = session.perform(&action, &text, dirty, &image_sources, &NativeDialogs(window.clone(), heading))?;
         result.mermaid = session.doc.is_mermaid();
         title(
             &window,
@@ -152,7 +154,7 @@ async fn attach_image(
         let mut session = shared.lock().map_err(|e| e.to_string())?;
         let mut saved = false;
         if session.doc.path.is_none() {
-            let response = session.perform("save", &text, dirty, &NativeDialogs(window.clone(), heading))?;
+            let response = session.perform("save", &text, dirty, &[], &NativeDialogs(window.clone(), heading))?;
             if response.kind != "saved" {
                 return Ok(serde_json::json!({"source": null, "saved": false}));
             }
@@ -167,10 +169,41 @@ async fn attach_image(
 #[tauri::command]
 fn open_link(href: String) -> Result<(), String> {
     let url = url::Url::parse(&href).map_err(|e| e.to_string())?;
-    if !["http", "https"].contains(&url.scheme()) {
-        return Err("Only web links can be opened.".into());
+    if !["http", "https", "mailto"].contains(&url.scheme()) {
+        return Err("Only web and email links can be opened.".into());
     }
     open::that(url.as_str()).map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn export_document(
+    window: WebviewWindow,
+    state: tauri::State<'_, Shared>,
+    format: String,
+    html: String,
+    heading: Option<String>,
+) -> Result<Option<String>, String> {
+    if !["html", "pdf"].contains(&format.as_str()) { return Err("Choose HTML or PDF export.".into()); }
+    if html.len() > export::LIMIT { return Err("The document exceeds the 64 MB export limit.".into()); }
+    let source = state.lock().map_err(|e| e.to_string())?.doc.path.clone();
+    let name = export::suggested_name(heading.as_deref(), source.as_deref(), &format);
+    let dialog_window = window.clone();
+    let dialog_source = source.clone();
+    let dialog_format = format.clone();
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_parent(&dialog_window)
+            .set_title(if dialog_format == "html" { "Export HTML" } else { "Export PDF" })
+            .add_filter(if dialog_format == "html" { "HTML document" } else { "PDF document" }, &[dialog_format.as_str()])
+            .set_file_name(name);
+        if let Some(parent) = dialog_source.as_ref().and_then(|p| p.parent()) { dialog = dialog.set_directory(parent); }
+        dialog.save_file()
+    }).await.map_err(|e| e.to_string())?;
+    let Some(path) = path else { return Ok(None); };
+    export::validate_path(&path, source.as_deref(), &format)?;
+    let display = path.to_string_lossy().into_owned();
+    if format == "html" {
+        tauri::async_runtime::spawn_blocking(move || export::write_html(&path, &html)).await.map_err(|e| e.to_string())??;
+    } else { export::write_pdf(window, path).await?; }
+    Ok(Some(display))
 }
 fn main() {
     let startup = std::env::args_os().nth(1).map(PathBuf::from);
@@ -179,7 +212,7 @@ fn main() {
             startup,
             ..Default::default()
         })))
-        .invoke_handler(tauri::generate_handler![perform, changed, image, attach_image, open_link])
+        .invoke_handler(tauri::generate_handler![perform, changed, image, attach_image, open_link, export_document])
         .setup(|app| {
             let window = tauri::WebviewWindowBuilder::new(
                 app,
@@ -195,12 +228,17 @@ fn main() {
                     || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
             })
             .build()?;
+            let export_menu = SubmenuBuilder::new(app, "Export")
+                .text("export:html", "HTML…")
+                .text("export:pdf", "PDF…")
+                .build()?;
             let file = SubmenuBuilder::new(app, "File")
                 .text("new", "New\tCtrl+N")
                 .text("open", "Open…\tCtrl+O")
                 .separator()
                 .text("save", "Save\tCtrl+S")
                 .text("saveAs", "Save As…\tCtrl+Shift+S")
+                .item(&export_menu)
                 .separator()
                 .text("close", "Close")
                 .build()?;

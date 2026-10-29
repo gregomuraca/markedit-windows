@@ -5,6 +5,11 @@ const dom = new JSDOM('');
 globalThis.window = dom.window;
 const { markdownPreview } = await import('../desktop/preview.mjs');
 
+test('save image inventory follows rendered Markdown and HTML, excluding code and frontmatter', () => {
+  const source = '---\nimage: ![ignored](front.png)\n---\n![inline](assets/a%20b.png)\n\n![reference][photo]\n\n[photo]: assets/ref.png\n\n<img src="assets/html.png">\n\n```md\n![example](code.png)\n```\n\n`![inline code](inline.png)`\n\n![duplicate](assets/ref.png)';
+  assert.deepEqual(markdownPreview(source).imageSources, ['assets/a%20b.png','assets/ref.png','assets/html.png']);
+});
+
 test('frontmatter becomes literal table cells, with body headings and task offsets preserved', () => {
   const source = '\uFEFF---\r\ntitle: <img src=x onerror=alert(1)>\r\ntags:\r\n  - notes\r\n---\r\n# Document\r\n\r\n- [ ] real';
   const { fragment, tasks, text } = markdownPreview(source);

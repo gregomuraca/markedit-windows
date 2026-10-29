@@ -1,16 +1,18 @@
 {
   "name": "markedit-rust",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Markdown editor for Windows with a Rust and Tauri desktop backend",
   "scripts": {
     "build": "node scripts/build.mjs",
     "dev": "tauri dev",
     "package": "tauri build --no-bundle",
     "test": "npm run build && jest --config CoreEditor/jest.config.js --runInBand && npm run test:preview",
-    "test:preview": "node --test scripts/preview.test.mjs scripts/formatting.test.mjs",
+    "test:preview": "node --test scripts/preview.test.mjs scripts/formatting.test.mjs scripts/gfm.test.mjs scripts/export.test.mjs",
     "typecheck": "tsc --project CoreEditor/tsconfig.json",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:ui": "node scripts/smoke.cjs",
+    "test:ui-export": "node scripts/export-ui.cjs",
+    "test:ui-images": "node scripts/images-ui.cjs",
     "test:ui-accessibility": "node scripts/ui-accessibility.cjs"
   },
   "keywords": [],

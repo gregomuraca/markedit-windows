@@ -18,6 +18,14 @@ export function markdownPreview(source) {
   const taskAttribute = `data-task-${crypto.randomUUID()}`;
   let taskCount = 0;
   const markdown = new Marked({ gfm: true, breaks: false, renderer: {
+    tablecell({tokens, header, align}) {
+      const tag = header ? 'th' : 'td';
+      return `<${tag}${align ? ` align="${align}"` : ''}>${this.parser.parseInline(tokens)}</${tag}>\n`;
+    },
+    html({text}) {
+      // GFM's tag filter displays these tags literally, before HTML sanitization.
+      return text.replace(/<(\/?)(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)(?=[\s/>])/gi, '&lt;$1$2');
+    },
     checkbox({ checked }) {
       return `<input type="checkbox" disabled ${checked ? 'checked' : ''} ${taskAttribute}="${taskCount++}">`;
     },
@@ -88,5 +96,6 @@ export function markdownPreview(source) {
     input.setAttribute('aria-label', `Toggle task: ${input.closest('li')?.textContent.trim().slice(0, 120) || index + 1}`);
     tasks.push({ input, from });
   }
-  return { fragment, tasks, text };
+  const imageSources = [...new Set([...fragment.querySelectorAll('img[src]')].map(img => img.getAttribute('src')))];
+  return { fragment, tasks, text, imageSources };
 }

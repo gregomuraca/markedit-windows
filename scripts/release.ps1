@@ -12,6 +12,8 @@ foreach ($name in @('README.md','DEVELOPMENT.md','LICENSE','THIRD-PARTY-NOTICES.
     Copy-Item (Join-Path $project $name) (Join-Path $portable $name)
 }
 Copy-Item -LiteralPath (Join-Path $project 'Screenshots') -Destination (Join-Path $portable 'Screenshots') -Recurse
+New-Item -ItemType Directory -Force (Join-Path $portable 'desktop') | Out-Null
+Copy-Item (Join-Path $project 'desktop/icon.png') (Join-Path $portable 'desktop/icon.png')
 # Capture source only; .gitignore excludes dependencies, profiles, binaries and build output.
 $files = git -C $project ls-files --cached --others --exclude-standard
 if ($LASTEXITCODE -ne 0) { throw 'Could not enumerate source files' }

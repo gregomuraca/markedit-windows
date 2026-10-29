@@ -15,6 +15,7 @@ import { isolateHistory } from '../CoreEditor/src/@vendor/commands/history';
 import { markdownPreview } from './preview.mjs';
 import { renderDiagram } from './diagrams.js';
 import { plainTextChanges, formattingState } from './formatting.mjs';
+import { exportDocument, mountPrintDocument } from './export.mjs';
 
 const $ = id => document.getElementById(id);
 let savedText = '', isBusy = false, loading = false, timer, renderGeneration = 0, scrollPending = false;
@@ -64,10 +65,10 @@ function refresh() {
   $('line-ending').textContent = window.editor.state.lineBreak === '\r\n' ? 'CRLF':'LF';
   renderPreview(text);
 }
-async function renderPreview(text) {
+async function renderPreview(text, diagramDark = !!prefs.dark) {
   const generation = ++renderGeneration, preview = $('preview'), oldScroll = preview.scrollTop;
   if(text.length > 1000000) { preview.textContent='Live preview is paused for documents over 1 million characters. You can still edit and save the complete file.'; return; }
-  if(!text.trim()) { preview.innerHTML = '<div class="empty"><strong>A little room to write.</strong><p>Your Markdown will appear here as you type.</p></div>'; return; }
+  if(!text.trim()) { preview.innerHTML = '<div class="empty"><strong>A little room to write.</strong><p>Your Markdown will appear here as you type.</p></div>'; return generation; }
   const { fragment, tasks, text: previewText } = markdownPreview(mermaidFile ? '' : text);
   for (const {input, from} of tasks) {
     input.disabled = isBusy;
@@ -92,9 +93,7 @@ async function renderPreview(text) {
   const slugs=new Map();
   for(const heading of fragment.querySelectorAll('h1,h2,h3,h4,h5,h6')) { const base=heading.textContent.toLowerCase().trim().replace(/[^\p{L}\p{N}\s_-]/gu,'').replace(/\s/g,'-'); const count=slugs.get(base)||0;slugs.set(base,count+1);const slug=base+(count?`-${count}`:'');heading.dataset.anchor=slug;heading.id=`preview-heading-${slug}`; }
   preview.replaceChildren(fragment); preview.scrollTop = oldScroll;
-  for (const {source, figure} of diagrams) {
-    void renderDiagram(source, figure, !!prefs.dark, () => generation === renderGeneration && figure.isConnected);
-  }
+  const renderedDiagrams = diagrams.map(({source, figure}) => renderDiagram(source, figure, diagramDark, () => generation === renderGeneration && figure.isConnected));
   for(const {img,source} of images) {
     const data = source ? await window.desktop.image(source).catch(()=>null) : null;
     if(generation !== renderGeneration) return;
@@ -105,8 +104,23 @@ async function renderPreview(text) {
       img.replaceWith(note);
     };
     img.onerror=unavailable;
-    if(data) img.src=data; else unavailable();
+    if(data) { img.src=data; try { await img.decode(); } catch { unavailable(); } } else unavailable();
   }
+  await Promise.all(renderedDiagrams);
+  await Promise.all([...preview.querySelectorAll('.mermaid-diagram img')].map(img=>img.decode().catch(()=>{})));
+  return generation;
+}
+async function prepareExport() {
+  const text=getEditorText();
+  if(text.length>1000000)throw new Error('Export supports documents up to one million characters. Reduce the document size and try again.');
+  clearTimeout(timer);
+  try {
+    const generation=await renderPreview(text,false);
+    if(generation!==renderGeneration)throw new Error('The preview changed while preparing export. Please try again.');
+    const result=exportDocument($('preview'));
+    const unmount=mountPrintDocument(document,result.article);
+    return {...result,cleanup:()=>{unmount();void renderPreview(getEditorText());}};
+  } catch(error) { void renderPreview(getEditorText()); throw error; }
 }
 async function load(text, standaloneMermaid = false) {
   mermaidFile = standaloneMermaid;
@@ -119,7 +133,7 @@ async function load(text, standaloneMermaid = false) {
 function setBusy(value, label = 'Working…') {
   isBusy=value; settings.setReadOnlyMode(value);
   $('workspace').setAttribute('aria-busy',String(value));
-  document.querySelectorAll('[data-action],.formatbar button,.formatbar select,#replace-next,#replace-all,#preview input[data-preview-task]').forEach(b=>b.disabled=value);
+  document.querySelectorAll('[data-action],#export-format,.formatbar button,.formatbar select,#replace-next,#replace-all,#preview input[data-preview-task]').forEach(b=>b.disabled=value);
   $('more-formatting').querySelector('summary').setAttribute('aria-disabled',String(value));
   $('save-state').textContent=value?label:getEditorText()!==savedText?'Unsaved changes':'All changes saved';
   if(value)$('more-formatting').open=false;
@@ -165,9 +179,10 @@ function syncScroll() {
 }
 window.windowsEditor={ snapshot:()=>{
   const text=getEditorText();
-  const heading=mermaidFile?null:markdownPreview(text).fragment.querySelector('h1')?.textContent.trim()||null;
-  return {text,dirty:text!==savedText,heading};
-},setBusy,load,setMermaid:value=>{mermaidFile=value;} };
+  const parsed=mermaidFile?null:markdownPreview(text);
+  const heading=parsed?.fragment.querySelector('h1')?.textContent.trim()||null;
+  return {text,dirty:text!==savedText,heading,imageSources:parsed?.imageSources||[]};
+},setBusy,load,prepareExport,setMermaid:value=>{mermaidFile=value;} };
 window.desktop.onCommand(command);
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>window.desktop.action(b.dataset.action));
 document.querySelectorAll('[data-command]').forEach(b=>{b.onmousedown=e=>e.preventDefault();b.onclick=()=>{command(b.dataset.command,b.dataset.value);$('more-formatting').open=false;}});
@@ -231,6 +246,7 @@ $('more-formatting').addEventListener('focusout',()=>{
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('more-formatting').open){$('more-formatting').open=false;$('more-formatting').querySelector('summary').focus();e.preventDefault();}});
 document.querySelectorAll('button[data-layout]').forEach(b=>b.onclick=()=>layout(b.dataset.layout));
 $('theme').onclick=()=>setting({key:'dark',value:!document.body.classList.contains('dark')});
+$('export-format').onchange=()=>{const format=$('export-format').value;$('export-format').value='';void window.desktop.exportDocument(format);};
 $('dismiss-error').onclick=()=>{$('action-notice').hidden=true;window.editor.focus();};
 $('query').oninput=searchQuery; $('replacement').oninput=searchQuery;
 $('query').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();(e.shiftKey?findPrevious:findNext)(window.editor)}};
