@@ -1,6 +1,6 @@
 {
   "name": "markedit-windows-launcher",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Install and open the verified MarkEdit for Windows portable release",
   "license": "MIT",
   "engines": {"node": ">=20"},

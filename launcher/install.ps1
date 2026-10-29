@@ -24,7 +24,9 @@ try {
  $taskZip=Join-Path $taskWork $taskAsset
  Write-Output "Downloading MarkEdit $Version..."
  Invoke-WebRequest "$taskBase/$taskAsset" -OutFile $taskZip -UseBasicParsing
- $taskManifest=(Invoke-WebRequest "$taskBase/SHA256SUMS.txt" -UseBasicParsing).Content
+ $taskManifestFile=Join-Path $taskWork 'SHA256SUMS.txt'
+ Invoke-WebRequest "$taskBase/SHA256SUMS.txt" -OutFile $taskManifestFile -UseBasicParsing
+ $taskManifest=Get-Content -LiteralPath $taskManifestFile -Raw -Encoding ASCII
  $taskPattern='(?m)^([a-fA-F0-9]{64})\s+\*?'+[Regex]::Escape($taskAsset)+'\s*$'
  $taskMatch=[Regex]::Match($taskManifest,$taskPattern)
  if(-not $taskMatch.Success){throw 'The release checksum manifest does not contain this ZIP.'}
