@@ -1,0 +1,64 @@
+{
+  "name": "markedit-app",
+  "version": "1.0.0",
+  "description": "Just like TextEdit on Mac but dedicated to Markdown.",
+  "scripts": {
+    "dev": "vite",
+    "lint": "eslint .",
+    "typecheck": "tsc",
+    "codegen": "ts-gyb --config ./src/@codegen/config.json >/dev/null",
+    "test": "jest",
+    "build": "yarn lint && yarn typecheck && yarn codegen && vite build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.0.0",
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/lang-yaml": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/legacy-modes": "^6.0.0",
+    "@codemirror/search": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "@lezer/common": "^1.0.0",
+    "@lezer/highlight": "^1.0.0",
+    "@lezer/html": "^1.0.0",
+    "@lezer/lr": "^1.0.0",
+    "@lezer/markdown": "^1.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@stylistic/eslint-plugin": "^5.5.0",
+    "@types/jest": "^29.5.4",
+    "@typescript-eslint/parser": "^8.67.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-compat": "^6.0.2",
+    "eslint-plugin-promise": "^7.2.1",
+    "globals": "^15.15.0",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "markedit-api": "https://github.com/MarkEdit-app/MarkEdit-api#v0.35.0",
+    "ts-gyb": "^0.12.0",
+    "ts-jest": "^29.4.5",
+    "tslib": "^2.6.2",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.47.0",
+    "vite": "^8.0.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  },
+  "resolutions": {
+    "js-yaml": "^4.3.1",
+    "minimatch": "^10.2.5",
+    "picomatch": "^4.0.4"
+  },
+  "browserslist": [
+    "safari >= 18"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "yarn@4.18.0"
+}

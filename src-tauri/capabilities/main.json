@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Only the main local editor may listen to desktop menu events. No general filesystem, shell, or remote permissions.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

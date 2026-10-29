@@ -1,0 +1,11 @@
+{
+  "name": "markedit-windows-launcher",
+  "version": "0.3.3",
+  "description": "Install and open the verified MarkEdit for Windows portable release",
+  "license": "MIT",
+  "engines": {"node": ">=20"},
+  "bin": {"markedit": "cli.cjs"},
+  "files": ["cli.cjs", "install.ps1", "LICENSE", "README.md"],
+  "scripts": {"test": "node --test cli.test.cjs"},
+  "repository": {"type": "git", "url": "https://github.com/gregomuraca/markedit-windows.git", "directory": "launcher"}
+}

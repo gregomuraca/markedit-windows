@@ -1,0 +1,73 @@
+{
+  "name": "markedit-rust",
+  "version": "0.3.3",
+  "description": "Markdown editor for Windows with a Rust and Tauri desktop backend",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tauri dev",
+    "package": "tauri build --no-bundle",
+    "test": "npm run build && jest --config CoreEditor/jest.config.js --runInBand && npm run test:preview",
+    "test:preview": "node --test scripts/preview.test.mjs scripts/formatting.test.mjs",
+    "typecheck": "tsc --project CoreEditor/tsconfig.json",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:ui": "node scripts/smoke.cjs",
+    "test:ui-accessibility": "node scripts/ui-accessibility.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.0.0",
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/lang-yaml": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/legacy-modes": "^6.0.0",
+    "@codemirror/search": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "@lezer/common": "^1.0.0",
+    "@lezer/highlight": "^1.0.0",
+    "@lezer/html": "^1.0.0",
+    "@lezer/lr": "^1.0.0",
+    "@lezer/markdown": "^1.0.0",
+    "@tauri-apps/api": "^2.0.0",
+    "dompurify": "^3.4.16",
+    "marked": "^18.0.14",
+    "mermaid": "12.1.0"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0",
+    "@eslint/js": "^9.39.0",
+    "@stylistic/eslint-plugin": "^5.5.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/jest": "^29.5.4",
+    "@typescript-eslint/parser": "^8.67.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-compat": "^6.0.2",
+    "eslint-plugin-promise": "^7.2.1",
+    "globals": "^15.15.0",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "markedit-api": "git+https://github.com/MarkEdit-app/MarkEdit-api.git#v0.35.0",
+    "playwright": "^1.58.0",
+    "ts-gyb": "^0.12.0",
+    "ts-jest": "^29.4.5",
+    "tslib": "^2.6.2",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.47.0",
+    "vite": "^8.0.0",
+    "vite-plugin-singlefile": "^2.3.3"
+  },
+  "resolutions": {
+    "js-yaml": "^4.3.1",
+    "minimatch": "^10.2.5",
+    "picomatch": "^4.0.4"
+  },
+  "browserslist": [
+    "Chrome >= 140"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

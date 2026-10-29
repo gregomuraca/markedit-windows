@@ -1,0 +1,315 @@
+import { EditorView, KeyBinding } from '@codemirror/view';
+import { EditorSelection, findClusterBreak } from '@codemirror/state';
+import {
+  copyLineDown,
+  copyLineUp,
+  cursorPageDown,
+  cursorPageUp,
+  indentLess,
+  indentMore,
+  moveLineDown,
+  moveLineUp,
+  selectLine,
+  selectPageDown,
+  selectPageUp,
+  selectParentSyntax,
+  toggleBlockComment,
+  toggleComment,
+} from '@codemirror/commands';
+
+import { EditCommand } from './types';
+import { scrollIntoView } from '../selection';
+import formatContent from './formatContent';
+import toggleBlockWithMarks from './toggleBlockWithMarks';
+import toggleLineLeadingMark from './toggleLineLeadingMark';
+import toggleListStyle from './toggleListStyle';
+import replaceSelections from './replaceSelections';
+import insertBlockWithMarks from './insertBlockWithMarks';
+import insertSnippet from '../snippets/insertSnippet';
+
+export function toggleBold() {
+  toggleBlockWithMarks('**', '**', 'StrongEmphasis', 'EmphasisMark');
+}
+
+export function toggleItalic() {
+  toggleBlockWithMarks('*', '*', 'Emphasis', 'EmphasisMark');
+}
+
+export function toggleStrikethrough() {
+  toggleBlockWithMarks('~~', '~~', 'Strikethrough', 'StrikethroughMark');
+}
+
+export function toggleInlineCode() {
+  toggleBlockWithMarks('`', '`', 'InlineCode', 'CodeMark');
+}
+
+export function toggleInlineMath() {
+  toggleBlockWithMarks('$', '$');
+}
+
+export function toggleHeading(level: number) {
+  toggleLineLeadingMark('#', level);
+}
+
+export function toggleBlockquote() {
+  toggleLineLeadingMark('>', 1);
+}
+
+/**
+ * Toggle list markers like "- Item", "* Item", or "+ Item".
+ */
+export function toggleBullet() {
+  toggleListStyle(() => /^([ \t]*[-*+] )(?! *\[[ xX]\]) */, (_, suggested) => suggested ?? '-');
+}
+
+/**
+ * Toggle list markers like "1. Item".
+ */
+export function toggleNumbering() {
+  toggleListStyle(index => new RegExp(`^([ \t]*${index + 1}\\. )`), index => `${index + 1}.`);
+}
+
+/**
+ * Toggle list markers like "- [ ] Todo" or "- [x] Done".
+ */
+export function toggleTodo() {
+  toggleListStyle(
+    () => /^([ \t]*[-*+] +\[[ xX]\] +)/,
+    () => '- [ ]',
+    line => {
+      if (!/[-*+] +\[ \]/.test(line)) {
+        return undefined;
+      }
+
+      // Change "- [ ] Item" to "- [x] Item"
+      return line.replace(/([-*+] +\[) (\].*)/, '$1x$2');
+    },
+  );
+}
+
+export function insertHorizontalRule() {
+  const br = window.editor.state.lineBreak;
+  replaceSelections(`${br}---${br}`);
+}
+
+export function insertCodeBlock() {
+  const state = window.editor.state;
+  const { main, ranges } = state.selection;
+  const selected = state.sliceDoc(main.from, main.to);
+
+  // Snippets only handle a single, single-line selection, otherwise keep the plain wrapping behavior.
+  // Note: sliceDoc always uses LF regardless of state.lineBreak, so detect line breaks with '\n'.
+  if (ranges.length > 1 || selected.includes('\n')) {
+    insertBlockWithMarks('```');
+    return;
+  }
+
+  const doc = state.doc;
+  const lineBreak = state.lineBreak;
+  const fence = '`'.repeat(3);
+  const prefix = doc.lineAt(main.from).from === main.from ? '' : lineBreak;
+  const suffix = doc.lineAt(main.to).to === main.to ? '' : lineBreak;
+  const content = selected.replace(/[{}]/g, ch => `\\${ch}`); // Escape snippet placeholder delimiters
+
+  // Placeholders for the language and the content, on their own lines
+  insertSnippet(
+    `${prefix}${fence}#{}${lineBreak}#{${content}}${lineBreak}${fence}${suffix}`,
+    '',
+    { from: main.from, to: main.to },
+  );
+}
+
+export function insertMathBlock() {
+  insertBlockWithMarks('$$');
+}
+
+export function clearSyntaxSelections() {
+  // We can't reliably distinguish user selections from syntax-aware selection changes
+  if (Date.now() - storage.historyChangedTime < 150) {
+    return;
+  }
+
+  storage.selectionHistory = [];
+}
+
+export const emojiDeletionKeymap: KeyBinding[] = [
+  { key: 'Backspace', run: deleteEmojiBackward, shift: deleteEmojiBackward },
+];
+
+/**
+ * Wrapper to a series of commands in CodeMirror,
+ * we need this because we want to show them in the application.
+ */
+export function performEditCommand(command: EditCommand) {
+  const editor = window.editor;
+  switch (command) {
+    case EditCommand.indentLess: indentLess(editor); break;
+    case EditCommand.indentMore: indentMore(editor); break;
+    case EditCommand.expandSelection: expandSelection(editor); break;
+    case EditCommand.shrinkSelection: shrinkSelection(editor); break;
+    case EditCommand.selectLine: selectLine(editor); break;
+    case EditCommand.moveLineUp: moveLineUp(editor); break;
+    case EditCommand.moveLineDown: moveLineDown(editor); break;
+    case EditCommand.copyLineUp: copyLineUp(editor); break;
+    case EditCommand.copyLineDown: copyLineDown(editor); break;
+    case EditCommand.toggleLineComment: toggleLineComment(editor); break;
+    case EditCommand.toggleBlockComment: toggleBlockComment(editor); break;
+    default: break;
+  }
+}
+
+export const customizedCommandsKeymap: KeyBinding[] = [
+  {
+    key: 'Home',
+    run: () => {
+      scrollIntoView(0, 'center', 0);
+      return true;
+    },
+  },
+  {
+    key: 'End',
+    run: editor => {
+      scrollIntoView(editor.state.doc.length, 'center', 0);
+      return true;
+    },
+  },
+  {
+    key: 'Mod-/',
+    run: toggleLineComment,
+  },
+  // Page keys scroll without moving the caret, moving it requires option
+  {
+    key: 'PageUp',
+    run: editor => scrollByPage(editor, false),
+    shift: selectPageUp,
+  },
+  {
+    key: 'PageDown',
+    run: editor => scrollByPage(editor, true),
+    shift: selectPageDown,
+  },
+  {
+    key: 'Alt-PageUp',
+    run: cursorPageUp,
+    shift: selectPageUp,
+  },
+  {
+    key: 'Alt-PageDown',
+    run: cursorPageDown,
+    shift: selectPageDown,
+  },
+];
+
+export { formatContent };
+export type { EditCommand };
+
+function deleteEmojiBackward(editor: EditorView) {
+  const state = editor.state;
+  if (state.readOnly) {
+    return false;
+  }
+
+  const starts = state.selection.ranges.map(range => {
+    if (!range.empty) {
+      return undefined;
+    }
+
+    const line = state.doc.lineAt(range.from);
+    const pos = range.from - line.from;
+    const precedingText = line.text.slice(0, pos);
+    const subdivisionFlagFrom = precedingText.search(/\u{1F3F4}[\u{E0020}-\u{E007E}]+\u{E007F}$/u);
+    const from = subdivisionFlagFrom < 0 ? findClusterBreak(line.text, pos, false, true) : subdivisionFlagFrom;
+    return isEmojiSplitByBackwardDeletion(line.text.slice(from, pos)) ? from + line.from : undefined;
+  });
+
+  if (starts.some(from => from === undefined)) {
+    return false;
+  }
+
+  let index = 0;
+  const updates = state.changeByRange(range => {
+    const from = starts[index++] as number;
+    return {
+      changes: { from, to: range.from },
+      range: EditorSelection.cursor(from),
+    };
+  });
+
+  editor.dispatch(state.update(updates, {
+    scrollIntoView: true,
+    userEvent: 'delete.backward',
+  }));
+
+  return true;
+}
+
+/**
+ * Scroll one page, leaving the selection untouched.
+ */
+function scrollByPage(editor: EditorView, forward: boolean) {
+  const scroller = editor.scrollDOM;
+  const distance = Math.max(editor.defaultLineHeight, scroller.clientHeight - editor.defaultLineHeight);
+  scroller.scrollBy({ top: forward ? distance : -distance });
+  return true;
+}
+
+function expandSelection(editor: EditorView) {
+  storage.historyChangedTime = Date.now();
+  const selection = editor.state.selection;
+  if (selectParentSyntax(editor)) {
+    storage.selectionHistory.push(selection);
+  }
+}
+
+function shrinkSelection(editor: EditorView) {
+  storage.historyChangedTime = Date.now();
+  const selection = storage.selectionHistory.pop();
+  if (selection !== undefined) {
+    editor.dispatch({ selection });
+  }
+}
+
+/**
+ * Improved comment toggling, the behavior of empty line is optimized.
+ */
+function toggleLineComment(editor: EditorView): boolean {
+  const selection = editor.state.selection;
+  const { from, to } = selection.main;
+
+  // Handle the case where inserting comment at an empty line,
+  // only for single selection to make the logic simpler.
+  if (selection.ranges.length === 1 && from === to) {
+    const line = editor.state.doc.lineAt(from);
+    if (line.text.length === 0) {
+      const open = '<!-- ';
+      const close = ' -->';
+      editor.dispatch({
+        changes: {
+          from,
+          insert: open + close,
+        },
+        // Place the caret in the middle so we can continue typing
+        selection: EditorSelection.cursor(from + open.length),
+      });
+
+      return true;
+    }
+  }
+
+  // Works more reliably than toggleLineComment in @codemirror/commands
+  return toggleComment(editor);
+}
+
+function isEmojiSplitByBackwardDeletion(cluster: string) {
+  return /^[#*0-9]\uFE0F?\u20E3$/u.test(cluster)
+    || /(?:^|\u200D)\p{Emoji_Modifier_Base}\uFE0F?\p{Emoji_Modifier}$/u.test(cluster)
+    || /^\u{1F3F4}[\u{E0020}-\u{E007E}]+\u{E007F}$/u.test(cluster);
+}
+
+const storage: {
+  selectionHistory: EditorSelection[];
+  historyChangedTime: number;
+} = {
+  selectionHistory: [],
+  historyChangedTime: 0,
+};

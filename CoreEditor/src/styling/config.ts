@@ -1,0 +1,311 @@
+import { EditorView } from '@codemirror/view';
+import { EditorColors, EditorTheme } from './types';
+import { Config, WebFontFace, InvisiblesBehavior } from '../config';
+import { globalState, editingState, styleSheets } from '../common/store';
+import { observeGuttersWidth, adjustGutterPositions } from '../modules/lines';
+import { refreshEditFocus } from '../modules/selection';
+import { gutterExtensions } from './nodes/gutter';
+import { invisiblesExtension } from './nodes/invisible';
+import { lineIndicatorLayer } from './nodes/line';
+import { selectedLinesDecoration } from './nodes/selection';
+import { calculateFontSize } from './nodes/heading';
+import { shadowableTextColor, updateStyleSheet } from './helper';
+import { isMouseDown } from '../modules/events';
+import { tryGetEditor, afterDomUpdate, isMotionReduced } from '../common/utils';
+
+/**
+ * Style sheets that can be changed dynamically.
+ *
+ * Generally, we can either disable them or update css rules inside them.
+ */
+export default interface StyleSheets {
+  accentColor?: HTMLStyleElement;
+  fontFace?: HTMLStyleElement;
+  fontSize?: HTMLStyleElement;
+  typewriterMode?: HTMLStyleElement;
+  focusMode?: HTMLStyleElement;
+  lineHeight?: HTMLStyleElement;
+  taskMarker?: HTMLStyleElement;
+}
+
+export function setUp(config: Config, colors: EditorColors) {
+  setEditorColors(colors);
+  setFontFace(config.fontFace);
+  setFontSize(config.fontSize);
+  setTypewriterMode(config.typewriterMode);
+  updateFocusModeStyle(config.focusMode);
+  setLineHeight(config.lineHeight);
+  setOverscrollBehavior(config.lineWrapping);
+
+  if (config.showLineNumbers) {
+    // Delay because when the window is resizing, the mouse can enter and leave gutters rapidly
+    setTimeout(enableGutterHoverEffects, 500);
+    enableGuttersObserver();
+  }
+}
+
+export function setTheme(theme: EditorTheme) {
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.theme.reconfigure(theme.extension),
+  });
+
+  setEditorColors(theme.colors);
+}
+
+export function setFontFace(fontFace: WebFontFace) {
+  if (styleSheets.fontFace === undefined) {
+    styleSheets.fontFace = createStyleSheet('.cm-content, .cm-tooltip-autocomplete * {}');
+  }
+
+  updateStyleSheet(styleSheets.fontFace, style => {
+    style.fontWeight = fontFace.weight ?? '';
+    style.fontStyle = fontFace.style ?? '';
+
+    const fallbacks = [
+      'ui-monospace',
+      'monospace',
+      'Menlo',
+      'system-ui',
+      'Helvetica',
+      'Arial',
+      'sans-serif',
+    ];
+
+    // The desired family goes first, followed by the fallbacks minus a possible duplicate
+    const fontFamilies = [
+      fontFace.family,
+      ...fallbacks.filter(family => family !== fontFace.family),
+    ];
+
+    style.fontFamily = fontFamilies.join(', ');
+  });
+}
+
+export function setFontSize(fontSize: number) {
+  if (styleSheets.fontSize === undefined) {
+    const h = (level: number): string => {
+      const cls = `.cm-md-heading${level}`;
+      return `${cls}, *:has(> ${cls}) {}`;
+    };
+
+    styleSheets.fontSize = createStyleSheet(`
+      .cm-editor {}
+      .cm-foldPlaceholder {}
+      ${[h(1), h(2), h(3), h(4), h(5), h(6)].join('\n')}
+    `);
+  }
+
+  updateStyleSheet(styleSheets.fontSize, (style, rule) => {
+    // Smaller font size for fold placeholder (...)
+    if (rule.selectorText === '.cm-foldPlaceholder') {
+      style.fontSize = `${fontSize - 4}px`;
+      return;
+    }
+
+    // E.g., .cm-md-heading1 -> 1, .cm-editor -> 0
+    const match = rule.selectorText.match(/\d+/);
+    const headingLevel = parseInt(match === null ? '0' : match[0]);
+    style.fontSize = `${calculateFontSize(fontSize, headingLevel)}px`;
+  });
+}
+
+export function setShowLineNumbers(enabled: boolean) {
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.gutters?.reconfigure(enabled ? gutterExtensions : []),
+  });
+
+  if (enabled) {
+    enableGutterHoverEffects();
+    enableGuttersObserver();
+  }
+}
+
+export function setShowActiveLineIndicator(enabled: boolean) {
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.activeLine?.reconfigure(enabled ? lineIndicatorLayer : []),
+  });
+}
+
+export function setInvisiblesBehavior(behavior: InvisiblesBehavior) {
+  const hasSelection = editingState.hasSelection;
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.invisibles?.reconfigure(invisiblesExtension(behavior, hasSelection)),
+  });
+}
+
+export function setTypewriterMode(enabled: boolean) {
+  if (styleSheets.typewriterMode === undefined) {
+    styleSheets.typewriterMode = createStyleSheet(`
+      .cm-content {
+        padding-top: 50vh !important;
+      }
+    `, false);
+  }
+
+  styleSheets.typewriterMode.disabled = !enabled;
+}
+
+export function setFocusMode(enabled: boolean) {
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.selectedLines?.reconfigure(enabled ? selectedLinesDecoration : []),
+  });
+
+  updateFocusModeStyle(enabled);
+}
+
+export function setLineWrapping(enabled: boolean) {
+  tryGetEditor()?.dispatch({
+    effects: window.dynamics.lineWrapping?.reconfigure(enabled ? EditorView.lineWrapping : []),
+  });
+
+  setOverscrollBehavior(enabled);
+}
+
+export function setLineHeight(lineHeight: number) {
+  if (styleSheets.lineHeight === undefined) {
+    styleSheets.lineHeight = createStyleSheet('.cm-line, .cm-gutterElement {}');
+  }
+
+  // Prefer numbers (like 1.5) over percentages (like 150%), see https://developer.mozilla.org/en-US/docs/Web/CSS/line-height#number
+  updateStyleSheet(styleSheets.lineHeight, style => style.lineHeight = `${lineHeight}`);
+}
+
+export function setTaskMarkerStyle(enabled: boolean) {
+  if (styleSheets.taskMarker === undefined) {
+    styleSheets.taskMarker = createStyleSheet('.cm-md-taskMarker { cursor: default }');
+  }
+
+  styleSheets.taskMarker.disabled = !enabled;
+}
+
+export function setGutterHovered(hovered: boolean) {
+  const className = 'cm-gutterHover';
+  const gutterDOM = document.querySelector('.cm-foldGutter') as HTMLElement | null;
+
+  if (hovered && !globalState.hasModalSheet) {
+    gutterDOM?.classList.add(className);
+  } else {
+    gutterDOM?.classList.remove(className);
+  }
+
+  globalState.gutterHovered = hovered;
+  adjustGutterPositions('gutterHover');
+}
+
+export function applyReducedMotion(reduceMotion: boolean, types: 'both' | 'cursor' | 'gutter' = 'both') {
+  if (types === 'both' || types === 'cursor') {
+    const cursorLayer = document.querySelector('.cm-cursorLayer') as HTMLElement | null;
+    if (cursorLayer !== null) {
+      cursorLayer.style.animationTimingFunction = reduceMotion ? 'steps(1)' : '';
+    }
+  }
+
+  if (types === 'both' || types === 'gutter') {
+    const foldGutter = document.querySelector('.cm-foldGutter') as HTMLElement | null;
+    if (foldGutter !== null) {
+      // Fade with color (not opacity) to avoid compositing the gutter, see #1581.
+      foldGutter.style.transition = reduceMotion ? 'color 0s' : 'color 0.4s';
+      foldGutter.style.transitionDelay = reduceMotion ? '0s' : '0.1s';
+    }
+  }
+}
+
+function setEditorColors(colors: EditorColors) {
+  if (styleSheets.accentColor === undefined) {
+    styleSheets.accentColor = createStyleSheet('.cm-md-header:not(.cm-md-quote) {}');
+  }
+
+  updateStyleSheet(styleSheets.accentColor, style => {
+    const cssColor = shadowableTextColor(colors.accent);
+    Object.keys(cssColor).forEach(key => style.setProperty(key, cssColor[key] as string));
+  });
+
+  globalState.colors = colors;
+  window.dispatchEvent(new Event('editor-colors-changed'));
+}
+
+function enableGutterHoverEffects() {
+  const gutterDOM = tryGetGutters();
+  if (gutterDOM === null) {
+    return;
+  }
+
+  if (storage.mouseLeaveHandler !== undefined) {
+    gutterDOM.removeEventListener('mouseleave', storage.mouseLeaveHandler);
+  }
+
+  if (storage.mouseEnterHandler !== undefined) {
+    gutterDOM.removeEventListener('mouseenter', storage.mouseEnterHandler);
+  }
+
+  // Instead of using the :hover pseudo class,
+  // which is not reliable on WebKit when releasing the mouse outside the window,
+  // we handle hover state manually and expose methods to native.
+  storage.mouseLeaveHandler = () => setGutterHovered(false);
+  storage.mouseEnterHandler = () => {
+    if (!isMouseDown()) {
+      setGutterHovered(true);
+    }
+  };
+
+  gutterDOM.addEventListener('mouseleave', storage.mouseLeaveHandler);
+  gutterDOM.addEventListener('mouseenter', storage.mouseEnterHandler);
+
+  // Apply the current reduced-motion settings so gutter transition styles
+  // match the active preference.
+  applyReducedMotion(isMotionReduced(), 'gutter');
+}
+
+function enableGuttersObserver() {
+  const gutters = tryGetGutters();
+  if (gutters === null) {
+    return;
+  }
+
+  observeGuttersWidth(gutters);
+}
+
+function updateFocusModeStyle(enabled: boolean) {
+  if (styleSheets.focusMode === undefined) {
+    styleSheets.focusMode = createStyleSheet(`
+      .cm-line:not(.cm-selectedLineRange), .cm-gutterElement:not(.cm-activeLineGutter) {
+        opacity: 0.25;
+      }
+    `, false);
+
+    // The state is not initially correct without a focus refresh
+    if (enabled) {
+      afterDomUpdate(refreshEditFocus);
+    }
+  }
+
+  styleSheets.focusMode.disabled = !enabled;
+}
+
+function setOverscrollBehavior(enabled: boolean) {
+  const behavior = enabled ? 'none' : '';
+  document.documentElement.style.overscrollBehaviorX = behavior;
+  document.body.style.overscrollBehaviorX = behavior;
+}
+
+function createStyleSheet(styleText: string, enabled = true) {
+  const style = document.createElement('style');
+  document.head.appendChild(style);
+
+  style.textContent = styleText;
+  style.disabled = !enabled;
+
+  return style;
+}
+
+function tryGetGutters() {
+  return document.querySelector('.cm-gutters') as HTMLElement | null;
+}
+
+const storage: {
+  mouseLeaveHandler: (() => void) | undefined;
+  mouseEnterHandler: (() => void) | undefined;
+} = {
+  mouseLeaveHandler: undefined,
+  mouseEnterHandler: undefined,
+};

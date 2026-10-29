@@ -1,0 +1,205 @@
+const { chromium } = require('playwright');
+const { spawn, execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+
+async function run() {
+  const work = path.resolve(process.env.MARKEDIT_WORK_DIR || 'work', `tauri-smoke-${Date.now()}`);
+  await fs.mkdir(work, { recursive: true });
+  const standalone = ['mmd', 'mermaid'].includes(process.env.MARKEDIT_STARTUP_EXT);
+  const filename = path.join(work, `Notebook.${standalone ? process.env.MARKEDIT_STARTUP_EXT : 'md'}`);
+  const sample = '# A little room to write\r\n\r\nA simple place for **clear thoughts** and good ideas.\r\n\r\n## Today’s notes\r\n\r\n- [x] Make space for the important things\r\n- [ ] Turn a thought into a first draft\r\n\r\n> Write on the left. See your words take shape on the right.\r\n\r\n| Feature | Status |\r\n| --- | --- |\r\n| Live preview | Ready |\r\n| Local Markdown files | Always yours |\r\n';
+  await fs.writeFile(filename, '\uFEFF' + (standalone ? 'flowchart LR\n  A[Open] --> B[Read]' : sample));
+  const port = Number(process.env.MARKEDIT_DEBUG_PORT || 9337);
+  const executable = path.resolve(process.env.MARKEDIT_EXE || 'src-tauri/target/release/markedit-rust.exe');
+  const child = spawn(executable, [filename], { windowsHide: true, env: { ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+    WEBVIEW2_USER_DATA_FOLDER: path.join(work, 'profile'),
+  }, stdio: 'pipe' });
+  let launchError; child.on('error', e => { launchError = e; });
+  child.stderr.on('data', data => process.stderr.write(data));
+  let browser;
+  try {
+    for (let i = 0; i < 60; i++) {
+      if (launchError) throw launchError;
+      if (child.exitCode !== null) throw Error(`App exited with ${child.exitCode}`);
+      try { browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`); break; }
+      catch { await new Promise(r => setTimeout(r, 500)); }
+    }
+    assert.ok(browser, 'WebView2 debug endpoint started');
+    const context = browser.contexts()[0];
+    const page = context.pages()[0] || await context.waitForEvent('page');
+    page.setDefaultTimeout(15000);
+    const errors = []; page.on('pageerror', e => errors.push(e.message));
+    if (standalone) {
+      await page.waitForFunction(() => document.querySelector('.mermaid-diagram img')?.naturalWidth > 0 && !window.config.readOnlyMode);
+      await page.evaluate(() => { const e = window.editor; e.dispatch({ changes: { from: 0, to: e.state.doc.length, insert: 'flowchart TD\n  A[Saved] --> B[Diagram]' } }); });
+      await page.evaluate(() => window.desktop.action('save'));
+      assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFFflowchart TD\n  A[Saved] --> B[Diagram]');
+      await page.waitForFunction(() => document.querySelector('.mermaid-diagram img')?.naturalWidth > 0);
+      await page.evaluate(() => { void window.desktop.action('close'); });
+      assert.deepEqual(errors, []);
+      console.log(`PASS: standalone .${process.env.MARKEDIT_STARTUP_EXT} opens, renders, edits and saves through Rust.`);
+      return;
+    }
+    await page.waitForFunction(() => window.editor?.state?.doc.toString().startsWith('# A little room') && !window.config.readOnlyMode);
+    assert.equal(await page.locator('#preview table').count(), 1);
+    assert.equal(await page.locator('#preview input[type=checkbox]').count(), 2);
+    assert.equal(await page.locator('#line-ending').innerText(), 'CRLF');
+    assert.equal(await page.evaluate(() => window.windowsEditor.snapshot().dirty), false);
+    await page.screenshot({ path: process.env.MARKEDIT_SCREENSHOT || path.join(work, 'preview.png') });
+    await page.locator('#preview input[data-preview-task]').nth(1).check();
+    await page.evaluate(() => window.desktop.action('save'));
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFF' + sample.replace('- [ ] Turn', '- [x] Turn'));
+    await page.locator('#preview input[data-preview-task]').nth(1).uncheck();
+    await page.evaluate(() => window.desktop.action('save'));
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFF' + sample);
+    await page.locator('#theme').click(); assert.equal(await page.locator('body').getAttribute('class'), 'dark');
+    await page.locator('#theme').click();
+    await page.getByRole('button', { name: 'Read', exact: true }).click();
+    assert.equal(await page.locator('#write-pane').isVisible(), false);
+    await page.getByRole('button', { name: 'Split', exact: true }).click();
+    await page.locator('#divider').focus(); await page.keyboard.press('ArrowRight');
+    assert.equal(await page.locator('#divider').getAttribute('aria-valuenow'), '52');
+    const edit = text => page.evaluate(text => { const e = window.editor; e.dispatch({ changes: { from: 0, to: e.state.doc.length, insert: text.replace(/\r\n?|\n/g, e.state.lineBreak) } }); }, text);
+    const dialog = (title, button) => promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('scripts/dialog-test.ps1'), '-AppProcessId', String(child.pid), '-DialogTitle', title, '-ButtonText', button], { windowsHide: true, timeout: 25000 });
+    await edit('Heading example');
+    for (let level=1; level<=6; level++) {
+      await page.locator('#heading').selectOption(String(level));
+      assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), '#'.repeat(level)+' Heading example');
+    }
+    await page.locator('#heading').selectOption('6');
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), 'Heading example');
+    await page.keyboard.press('Control+6');
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), '###### Heading example');
+    await edit('keep this selection');
+    await page.evaluate(() => window.editor.dispatch({selection:{anchor:5,head:9}}));
+    await page.locator('#more-formatting summary').click();
+    await page.getByRole('button',{name:'Strikethrough',exact:true}).click();
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), 'keep ~~this~~ selection');
+    assert.equal(await page.locator('#more-formatting').getAttribute('open'),null);
+    await page.locator('#more-formatting summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('.format-menu').isVisible(),true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.format-menu').isVisible(),false);
+    assert.equal(await page.evaluate(()=>document.activeElement===document.querySelector('#more-formatting summary')),true);
+    await page.setViewportSize({width:720,height:480});
+    await page.evaluate(()=>document.documentElement.style.setProperty('--split','25%'));
+    await page.locator('#more-formatting summary').click();
+    await page.waitForFunction(()=>{const r=document.querySelector('.format-menu').getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;});
+    assert.equal(await page.locator('.format-menu').evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;}),true);
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({width:1200,height:740});
+    await page.evaluate(()=>document.documentElement.style.setProperty('--split','52%'));
+    await page.evaluate(() => window.windowsEditor.setBusy(true));
+    assert.equal(await page.locator('#heading').isDisabled(),true);
+    await page.evaluate(() => window.windowsEditor.setBusy(false));
+    const tasks = '```md\n- [ ] example only\n```\n\n- [ ] real task\n  - [X] child task\n\n> - [ ] quoted task\n';
+    await edit(tasks);
+    await page.waitForFunction(() => document.querySelectorAll('#preview input[data-preview-task]').length === 3);
+    await page.getByRole('button', { name: 'Read', exact: true }).click();
+    await page.locator('#preview input[data-preview-task]').nth(0).check();
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), tasks.replace('- [ ] real task', '- [x] real task'));
+    assert.equal(await page.evaluate(() => window.windowsEditor.snapshot().dirty), true);
+    await page.getByRole('button', { name: 'Split', exact: true }).click();
+    await page.evaluate(() => window.editor.focus()); await page.keyboard.press('Control+z');
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), tasks);
+    await page.waitForFunction(() => !document.querySelector('#preview input[data-preview-task]').checked);
+    await page.locator('#preview input[data-preview-task]').nth(1).uncheck();
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), tasks.replace('[X]', '[ ]'));
+    await page.evaluate(() => window.desktop.action('save'));
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFF' + tasks.replace('[X]', '[ ]').replaceAll('\n', '\r\n'));
+    await page.evaluate(() => {
+      window.editor.dispatch({changes: {from: 0, insert: `New heading${window.editor.state.lineBreak}${window.editor.state.lineBreak}`}});
+      document.querySelector('#preview input[data-preview-task]').click();
+    });
+    assert.ok((await page.evaluate(() => window.editor.state.doc.toString())).startsWith('New heading\n\n```md'));
+    assert.ok((await page.evaluate(() => window.editor.state.doc.toString())).includes('- [ ] real task'));
+    const alertText = ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION'].map(type => `> [!${type}]\n> **${type} body**`).join('\n\n') + '\n\n> [!note] This is a note\n\n> Ordinary quote';
+    await edit(alertText);
+    await page.waitForFunction(() => document.querySelectorAll('#preview .markdown-alert').length === 6);
+    assert.equal(await page.locator('#preview blockquote').count(), 1);
+    assert.equal(await page.locator('#preview .markdown-alert strong').count(), 5);
+    const calloutStyles = await page.locator('#preview .markdown-alert').evaluateAll(nodes=>nodes.slice(0,5).map(el=>({background:getComputedStyle(el).backgroundColor,mask:getComputedStyle(el.querySelector('.markdown-alert-icon')).maskImage,radius:getComputedStyle(el).borderRadius})));
+    assert.equal(new Set(calloutStyles.map(s=>s.mask)).size,5);
+    assert.ok(calloutStyles.every(s=>s.mask.startsWith('url(')&&s.background!=='rgba(0, 0, 0, 0)'&&s.radius==='5px'));
+    const exactColors = async () => {
+      const dark=await page.locator('body').evaluate(el=>el.classList.contains('dark'));
+      const ink=dark?'rgb(220, 226, 235)':'rgb(48, 56, 68)';
+      assert.equal(await page.locator('.markdown-alert-warning').evaluate(el=>getComputedStyle(el).color),ink);
+      assert.equal(await page.locator('.markdown-alert-warning .markdown-alert-title').evaluate(el=>getComputedStyle(el).color),dark?'rgb(255, 210, 138)':'rgb(107, 68, 0)');
+      assert.equal(await page.locator('.markdown-alert-warning').evaluate(el=>getComputedStyle(el).backgroundColor),dark?'rgb(48, 39, 25)':'rgb(255, 237, 185)');
+    };
+    await exactColors();
+    const lightColor = await page.locator('.markdown-alert-tip .markdown-alert-title').evaluate(el => getComputedStyle(el).color);
+    await page.locator('#theme').click();
+    assert.notEqual(await page.locator('.markdown-alert-tip .markdown-alert-title').evaluate(el => getComputedStyle(el).color), lightColor);
+    await exactColors();
+    if (process.env.MARKEDIT_FEATURE_SCREENSHOT) await page.screenshot({path:process.env.MARKEDIT_FEATURE_SCREENSHOT.replace('.png','-dark.png')});
+    await page.locator('#theme').click();
+    if (process.env.MARKEDIT_FEATURE_SCREENSHOT) await page.screenshot({path: process.env.MARKEDIT_FEATURE_SCREENSHOT});
+    await edit('```mermaid\nflowchart LR\n  A[Write] --> B[Preview]\n```');
+    await page.waitForFunction(() => document.querySelector('.mermaid-diagram img')?.naturalWidth > 0);
+    const lightDiagram = await page.locator('.mermaid-diagram img').getAttribute('src');
+    await page.locator('#theme').click();
+    await page.waitForFunction(previous => { const img = document.querySelector('.mermaid-diagram img'); return img?.naturalWidth > 0 && img.src !== previous; }, lightDiagram);
+    await page.locator('#theme').click();
+    await edit('```mermaid\nnot a diagram at all\n```');
+    await page.locator('.diagram-error').waitFor();
+    await edit('```mermaid\nsequenceDiagram\n  Alice->>Bob: Hello\n```');
+    await page.waitForFunction(() => document.querySelector('.mermaid-diagram img')?.naturalWidth > 0);
+    await edit('hello world'); await page.locator('.cm-content').click();
+    await page.keyboard.press('Control+End'); await page.keyboard.press('Home');
+    assert.equal(await page.evaluate(() => window.editor.state.selection.main.head), 0);
+    await page.keyboard.press('Control+a'); await page.getByTitle('Bold (Ctrl+B)').click();
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), '**hello world**');
+    await page.keyboard.press('Control+z');
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), 'hello world');
+    await page.keyboard.press('Control+f'); await page.locator('#query').fill('world');
+    await page.locator('#replacement').fill('Windows'); await page.locator('#replace-all').click();
+    await page.locator('#close-search').click();
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), 'hello Windows');
+    await page.keyboard.press('Control+s'); await page.waitForFunction(() => !window.windowsEditor.snapshot().dirty && !window.config.readOnlyMode);
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFFhello Windows');
+    await edit('unsaved draft');
+    await page.evaluate(() => { void window.desktop.action('new'); });
+    await dialog('Unsaved changes', 'Cancel');
+    await page.waitForFunction(() => !window.config.readOnlyMode);
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), 'unsaved draft');
+    await fs.writeFile(filename, 'external change');
+    await page.evaluate(() => { void window.desktop.action('save'); });
+    await dialog('File changed outside MarkEdit', 'Cancel');
+    await page.waitForFunction(() => !window.config.readOnlyMode);
+    assert.equal(await fs.readFile(filename, 'utf8'), 'external change');
+    await page.evaluate(() => { void window.desktop.action('save'); });
+    await dialog('File changed outside MarkEdit', 'OK');
+    await page.waitForFunction(() => !window.windowsEditor.snapshot().dirty && !window.config.readOnlyMode);
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFFunsaved draft');
+    await edit('# Safe\n<script>window.pwned=true</script>\n<img src=x onerror="window.pwned=true">\n[bad](javascript:alert(1))\n![remote](https://example.com/tracker.png)');
+    await page.waitForFunction(() => document.querySelector('#preview h1')?.textContent === 'Safe');
+    assert.equal(await page.locator('#preview script,#preview [onerror],#preview a[href^="javascript:"]').count(), 0);
+    assert.equal(await page.evaluate(() => window.pwned), undefined);
+    await fs.writeFile(path.join(work, 'pixel.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1XkAAAAASUVORK5CYII=', 'base64'));
+    await edit('![local](pixel.png)');
+    await page.waitForFunction(() => document.querySelector('#preview img')?.src.startsWith('data:image/png'));
+    await page.evaluate(() => window.windowsEditor.setBusy(true)); await edit('blocked');
+    assert.equal(await page.evaluate(() => window.editor.state.doc.toString()), '![local](pixel.png)');
+    await page.evaluate(() => window.windowsEditor.setBusy(false));
+    await edit(sample); await page.evaluate(() => window.desktop.action('save'));
+    assert.equal(await fs.readFile(filename, 'utf8'), '\uFEFF' + sample);
+    assert.deepEqual(errors, []);
+    await edit('discard this draft');
+    await page.evaluate(() => { void window.desktop.action('new'); });
+    await dialog('Unsaved changes', "Don't save");
+    await page.waitForFunction(() => window.editor.state.doc.length === 0 && !window.config.readOnlyMode);
+    await page.evaluate(() => { void window.desktop.action('close'); });
+    console.log('PASS: real Tauri executable; editable preview tasks, independent undo, CRLF/BOM task saves, stale-preview guard, all alert types and lowercase note, Mermaid light/dark rendering and error recovery; editor/file/dialog regression checks.');
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    if (child.exitCode === null) child.kill();
+  }
+}
+run().catch(e => { console.error(e); process.exitCode = 1; });

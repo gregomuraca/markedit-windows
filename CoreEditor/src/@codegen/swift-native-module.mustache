@@ -1,0 +1,118 @@
+//
+//  {{moduleName}}.swift
+//
+//  Generated using https://github.com/microsoft/ts-gyb
+//
+//  Don't modify this file manually, it's auto generated.
+//
+//  To make changes, edit template files under /CoreEditor/src/@codegen
+
+import Foundation
+import MarkEditCore
+
+@MainActor
+public protocol {{moduleName}}: NativeModule {
+  {{#methods}}
+  func {{methodName}}({{parametersDeclaration}}){{#returnType}} async -> {{returnType}}{{/returnType}}
+  {{/methods}}
+}
+
+public extension {{moduleName}} {
+  var bridge: NativeBridge { {{customTags.bridgeName}}(self) }
+}
+
+@MainActor
+final class {{customTags.bridgeName}}: NativeBridge {
+  static let name = "{{customTags.invokePath}}"
+
+  private let module: {{moduleName}}
+  private lazy var decoder = JSONDecoder()
+
+  init(_ module: {{moduleName}}) {
+    self.module = module
+  }
+
+  func invoke(method: String, parameters: Data) async -> Result<Any?, Error>? {
+    switch method {
+    {{#methods}}
+    case "{{methodName}}":
+      return await {{methodName}}(parameters: parameters)
+    {{/methods}}
+    default:
+      return nil
+    }
+  }
+  {{#methods}}
+
+  private func {{methodName}}(parameters: Data) async -> Result<Any?, Error>? {
+    {{#parameters.length}}
+    struct Message: Decodable {
+      {{#parameters}}
+      var {{name}}: {{type}}
+      {{/parameters}}
+
+      init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: BridgeFieldKey.self)
+        {{#parameters}}
+        {{name}} = try container.value("{{name}}")
+        {{/parameters}}
+      }
+    }
+
+    let message: Message
+    do {
+      message = try decoder.decode(Message.self, from: parameters)
+    } catch {
+      Logger.assertFail("Failed to decode parameters: \(parameters)")
+      return .failure(error)
+    }
+
+    {{/parameters.length}}
+    {{#returnType}}let result = await {{/returnType}}module.{{methodName}}({{#parameters}}{{name}}: message.{{name}}{{^last}}, {{/last}}{{/parameters}})
+    return .success({{#returnType}}result{{/returnType}}{{^returnType}}nil{{/returnType}})
+  }
+  {{/methods}}
+}
+{{#associatedTypes}}
+
+{{#custom}}
+{{#documentationLines}}
+///{{{.}}}
+{{/documentationLines}}
+public struct {{typeName}}: {{#isFromParameter}}{{#isFromReturn}}Codable{{/isFromReturn}}{{^isFromReturn}}Decodable{{/isFromReturn}}{{/isFromParameter}}{{^isFromParameter}}{{#isFromReturn}}Encodable{{/isFromReturn}}{{/isFromParameter}}, Sendable {
+  {{#members}}
+  {{#documentationLines}}
+  ///{{{.}}}
+  {{/documentationLines}}
+  public var {{name}}: {{type}}
+  {{/members}}
+  {{#staticMembers}}
+  {{#documentationLines}}
+  ///{{{.}}}
+  {{/documentationLines}}
+  private var {{name}}: {{type}} = {{{value}}}
+  {{/staticMembers}}
+
+  public init({{#members}}{{name}}: {{type}}{{^last}}, {{/last}}{{/members}}) {
+    {{#members}}
+    self.{{name}} = {{name}}
+    {{/members}}
+  }
+{{#isFromParameter}}{{> swift-decodable}}{{/isFromParameter}}
+{{#isFromReturn}}{{> swift-encodable}}{{/isFromReturn}}
+}
+{{/custom}}
+{{#enum}}
+{{#documentationLines}}
+///{{{.}}}
+{{/documentationLines}}
+public enum {{typeName}}: {{valueType}}, Codable, Sendable {
+  {{#members}}
+  {{#documentationLines}}
+  ///{{{.}}}
+  {{/documentationLines}}
+  case {{key}} = {{{value}}}
+  {{/members}}
+}
+{{/enum}}
+{{/associatedTypes}}

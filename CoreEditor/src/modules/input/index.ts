@@ -1,0 +1,287 @@
+import { EditorView } from '@codemirror/view';
+import { EditorSelection, Text, Transaction } from '@codemirror/state';
+import { foldEffect, unfoldEffect } from '@codemirror/language';
+import { startCompletion as startTooltipCompletion } from '@codemirror/autocomplete';
+import { alwaysRenderInvisibles } from '../../styling/nodes/invisible';
+import { globalState, editingState, isComposing } from '../../common/store';
+import { clearSyntaxSelections } from '../commands';
+import { startCompletion, isPanelVisible } from '../completion';
+import { hasRecentKeyPress } from '../events';
+import { isContentDirty, setHistoryExplictlyMoved } from '../history';
+import { adjustActiveLineGutter, adjustGutterPositions } from '../lines';
+import { tokenizePosition } from '../tokenizer';
+import { refreshEditFocus, scrollCaretToVisible, scrollToSelection, selectedLineColumn, updateActiveLine } from '../../modules/selection';
+
+import hasSelection from '../selection/hasSelection';
+import redrawSelectionLayer from '../selection/redrawSelectionLayer';
+import selectionChanged from '../selection/selectionChanged';
+import wrapBlock from './wrapBlock';
+import insertCodeBlock from './insertCodeBlock';
+
+export function filterTransaction(transaction: Transaction) {
+  // Return nothing for read-only mode
+  if (window.config.readOnlyMode && transaction.docChanged) {
+    return [];
+  }
+
+  // Prevent the browser from selecting line breaks at the end of lines
+  if (!transaction.docChanged && transaction.newSelection.ranges.length === 1 && (Date.now() - globalState.contextMenuOpenTime < 500)) {
+    const { state } = window.editor;
+    const { from, to } = transaction.newSelection.main;
+    if (state.sliceDoc(from, to) === state.lineBreak) {
+      return state.update({
+        changes: transaction.changes,
+        effects: transaction.effects,
+        selection: EditorSelection.cursor(from),
+      });
+    }
+  }
+
+  // Work around a WebKit IME bug where committing a composition over-deletes
+  // text before the caret (e.g., "**??**你" becomes "**你").
+  if (
+    !editingState.compositionEnded &&
+    editingState.compositionPosition !== undefined &&
+    editingState.compositionPosition <= transaction.startState.doc.length &&
+    transaction.docChanged &&
+    transaction.effects.length === 0 &&
+    transaction.isUserEvent('input.type.compose')
+  ) {
+    const anchor = editingState.compositionPosition;
+    const changes: { from: number; to: number; insert: Text }[] = [];
+    transaction.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      changes.push({ from: fromA, to: toA, insert: inserted });
+    });
+
+    // Clamp the change so composition never modifies text before it started
+    if (changes.length === 1) {
+      const { from, to, insert } = changes[0];
+      if (from < anchor) {
+        return transaction.startState.update({
+          changes: { from: anchor, to: Math.max(anchor, to), insert },
+          selection: EditorSelection.cursor(anchor + insert.length),
+          userEvent: 'input.type.compose',
+        });
+      }
+    }
+  }
+
+  return transaction;
+}
+
+/**
+ * Tokenize words at the click position, especially useful for languages like Chinese and Japanese.
+ */
+export function wordTokenizer() {
+  return EditorView.mouseSelectionStyle.of((editor, event) => {
+    if (tokenizePosition(event) === null) {
+      return null;
+    }
+
+    // There isn't an async way to get selection in CodeMirror,
+    // we simply just leave the selection as is and handle the updates in a "dblclick" event handler.
+    return {
+      get(_event, _extend, _multiple) { return editor.state.selection; },
+      update(_update) { /* no-op */ },
+    };
+  });
+}
+
+/**
+ * Give us an opportunity to intercept user inputs.
+ *
+ * @returns True to ignore the default behavior
+ */
+export function interceptInputs() {
+  const marksToWrap = ['*', '_', '~', '$'];
+
+  return EditorView.inputHandler.of((editor, from, to, insert) => {
+    // Enable auto character pairs only after composition ends,
+    // some characters act as marked text in certain languages, e.g., typing '`' followed by 'a' to input 'à'.
+    const autoCharacterPairs = window.config.autoCharacterPairs && !isComposing();
+
+    // E.g., wrap "selection" as "*selection*"
+    if (autoCharacterPairs && marksToWrap.includes(insert)) {
+      return wrapBlock(insert, editor);
+    }
+
+    // Insert triple backticks to create a code block
+    if (autoCharacterPairs && insert === '`') {
+      return insertCodeBlock(editor);
+    }
+
+    if ((window.config.suggestWhileTyping || isPanelVisible()) && insert.trim().length > 0) {
+      // Typing suggestions for non-space insertions
+      startCompletion({ afterDelay: 300, userInitiated: false });
+    } else if (isPanelVisible()) {
+      // Cancel the completion for whitespace insertions
+      window.nativeModules.completion.cancelCompletion();
+    }
+
+    // Try tooltip completion if selection is replaced
+    if (from !== to && insert.length > 0) {
+      setTimeout(() => startTooltipCompletion(editor), 200);
+    }
+
+    // Fallback to default behavior
+    return false;
+  });
+}
+
+/**
+ * Returns an extension that handles all the editor changes.
+ */
+export function observeChanges() {
+  return EditorView.updateListener.of(update => {
+    if (update.docChanged) {
+      // This should be called before updating the native view
+      setHistoryExplictlyMoved(update);
+
+      if (!update.transactions.some(tr => tr.annotation(Transaction.userEvent) === '@none')) {
+        // We need this because we have different line height for headings,
+        // CodeMirror doesn't by default fix the offset issue.
+        scrollCaretToVisible();
+
+        // Make sure the main selection is always centered for typewriter mode
+        if (window.config.typewriterMode) {
+          scrollToSelection('center');
+        }
+      }
+
+      // Keep the bottom pinned across an IME composition; the composing string and
+      // committed text differ in height, so CodeMirror would otherwise leave a gap.
+      if (editingState.wasScrolledToBottom && update.transactions.some(tr => tr.isUserEvent('input.type.compose'))) {
+        const scrollDOM = update.view.scrollDOM;
+        scrollDOM.scrollTop = scrollDOM.scrollHeight;
+
+        if (!isComposing()) {
+          editingState.wasScrolledToBottom = false;
+        }
+      }
+
+      // Work around a composition mode bug where whitespaces are not updated,
+      // we can probably remove this once EditContext is available.
+      if (alwaysRenderInvisibles() && isComposing()) {
+        const caretPos = update.startState.selection.main.from;
+        const enclosingText = update.startState.sliceDoc(caretPos - 1, caretPos + 1);
+        if (enclosingText === '  ') {
+          refreshEditFocus(true);
+        }
+      }
+
+      // Content is updated periodically
+      if (storage.contentUpdater !== undefined) {
+        clearTimeout(storage.contentUpdater);
+      }
+
+      storage.contentUpdater = setTimeout(() => {
+        window.nativeModules.core.notifyEditorDidBecomeIdle();
+      }, 1500);
+    }
+
+    if (selectionChanged(update) || update.docChanged) {
+      const newHasSelection = hasSelection();
+      const selectionStateChanged = editingState.hasSelection !== newHasSelection;
+      editingState.hasSelection = newHasSelection;
+
+      // We don't update active lines when composition is still ongoing.
+      //
+      // Instead, we will make an extra update after composition ended.
+      if (!isComposing() && selectionStateChanged) {
+        updateActiveLine(newHasSelection);
+      }
+
+      // Work around a WebKit bug where selection layer is not updated
+      if (!newHasSelection && selectionStateChanged) {
+        redrawSelectionLayer();
+      }
+
+      // Handle native updates.
+      //
+      // For large payloads (e.g., cursor far into a long line, or large selection),
+      // debounce to skip intermediate updates. sliceDoc is deferred inside getInfo()
+      // and only called when the update is actually sent. The snapshot is intentional:
+      // getInfo() is consistent with the other fields captured in this update.
+      const lineColumnState = selectedLineColumn();
+      const notifyViewDidUpdate = () => {
+        window.nativeModules.core.notifyViewDidUpdate({
+          contentEdited: update.docChanged,
+          compositionEnded: editingState.compositionEnded,
+          isDirty: isContentDirty(),
+          selectedLineColumn: lineColumnState.getInfo(),
+        });
+      };
+
+      if (storage.lineColumnUpdater !== undefined) {
+        clearTimeout(storage.lineColumnUpdater);
+        storage.lineColumnUpdater = undefined;
+      }
+
+      if (lineColumnState.isLargePayload) {
+        storage.lineColumnUpdater = setTimeout(notifyViewDidUpdate, 150);
+      } else {
+        notifyViewDidUpdate();
+      }
+
+      // Fragile but simple method to clear the syntax-aware selection stack
+      clearSyntaxSelections();
+    }
+
+    if (window.config.showLineNumbers) {
+      // Gutter update triggered by geometry or viewport changes (delayed)
+      if (update.geometryChanged || update.viewportChanged) {
+        if (storage.gutterUpdater !== undefined) {
+          clearTimeout(storage.gutterUpdater);
+        }
+
+        if (!isComposing() && update.docChanged) {
+          // To handle a case where line number rects are not correctly updated
+          update.view.requestMeasure();
+
+          requestAnimationFrame(() => {
+            // To handle a case where the active line doesn't report correct height, possibly due to text predictions
+            adjustActiveLineGutter();
+
+            // Content changed without key press, could be a system event like accepting inline predictions
+            if (!hasRecentKeyPress()) {
+              refreshEditFocus(); // Caret can be misplaced accepting inline predictions
+            }
+          });
+        }
+
+        // Document coordinates from the height map, coordsAtPos would force a synchronous layout
+        const caretOffsetY = storage.caretOffsetY;
+        storage.caretOffsetY = update.view.lineBlockAt(update.state.selection.main.to).bottom;
+
+        if (caretOffsetY !== undefined && caretOffsetY !== storage.caretOffsetY) {
+          // Re-layout immediately when the y-axis of the caret position changes
+          adjustGutterPositions();
+        } else {
+          // Otherwise, the update is throttled with a small delay
+          storage.gutterUpdater = setTimeout(adjustGutterPositions, 15);
+        }
+      }
+
+      // Gutter update triggered by fold or unfold actions (immediately)
+      if (update.transactions.some(tr => tr.effects.some(e => e.is(foldEffect) || e.is(unfoldEffect)))) {
+        adjustGutterPositions();
+      }
+
+      if (globalState.gutterHovered) {
+        adjustGutterPositions('gutterHover');
+      }
+    }
+  });
+}
+
+const storage: {
+  caretOffsetY: number | undefined;
+  gutterUpdater: ReturnType<typeof setTimeout> | undefined;
+  contentUpdater: ReturnType<typeof setTimeout> | undefined;
+  lineColumnUpdater: ReturnType<typeof setTimeout> | undefined;
+} = {
+  caretOffsetY: undefined,
+  gutterUpdater: undefined,
+  contentUpdater: undefined,
+  lineColumnUpdater: undefined,
+};
