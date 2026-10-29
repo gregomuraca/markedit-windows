@@ -40,7 +40,7 @@ Requires **Windows 10 or 11, x64**, and the [Microsoft Edge WebView2 Runtime](ht
 With Node.js 20 or newer:
 
 ```powershell
-npx --yes https://github.com/gregomuraca/markedit-windows/releases/download/v0.3.4/markedit-windows-launcher-0.3.4.tgz
+npx --yes https://github.com/gregomuraca/markedit-windows/releases/download/v0.3.4/markedit-windows-launcher-0.3.5.tgz
 ```
 
 The small launcher verifies and installs the Windows release in your user profile, creates a Start menu shortcut, and opens the app. It is hosted on GitHub, not the npm registry. Use `--install-only` to skip opening the app, or `--help` for options. [Installer source](launcher/install.ps1).
